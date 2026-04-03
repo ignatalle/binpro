@@ -100,13 +100,26 @@ class ProfitReaperBotV27:
                     "uuid",               # ID operación Binomo (phx_reply → response.uuid)
                     "resultado",          # WON / LOST (event bo closed)
                     "profit_real",        # Valor API win en USD (win centavos / 100)
+                    # --- FASE 1: Columnas de telemetría expandida ---
+                    "hour_utc",           # Hora UTC de la señal (int 0-23)
+                    "day_of_week",        # Día de semana UTC (int 0=lun, 6=dom)
+                    "rsi_value",          # RSI(14) en el momento de la señal
+                    "volatility_avg_15s", # Promedio de STD en ventana 15s
+                    "entry_price",        # Precio real de apertura (phx_reply)
+                    "exit_price",         # Precio real de cierre (bo closed)
+                    "amount_cents",       # Monto apostado en centavos
                 ])
             print(f"🧠 Gemini Logger inicializado: {self.gemini_log_file}")
 
-    GEMINI_EXTRA_COLS = ("uuid", "resultado", "profit_real")
+    # Columnas que pueden faltar en CSVs creados con versiones anteriores del bot
+    GEMINI_EXTRA_COLS = (
+        "uuid", "resultado", "profit_real",
+        "hour_utc", "day_of_week", "rsi_value",
+        "volatility_avg_15s", "entry_price", "exit_price", "amount_cents",
+    )
 
     def ensure_gemini_csv_schema(self):
-        """Añade uuid/resultado/profit_real a CSV existente si faltan."""
+        """Añade columnas faltantes a CSV existente (retrocompatibilidad)."""
         path = self.gemini_log_file
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return
@@ -128,9 +141,10 @@ class ProfitReaperBotV27:
                 df[col] = ""
         return df
 
-    def assign_uuid_to_latest_trade_row(self, uuid_str):
+    def assign_uuid_to_latest_trade_row(self, uuid_str, open_price=None):
         """
-        Asocia uuid a la primera fila CALL/PUT sin uuid (orden FIFO del CSV).
+        Asocia uuid (y opcionalmente entry_price) a la primera fila CALL/PUT
+        sin uuid (orden FIFO del CSV).
         Returns True si se actualizó una fila.
         """
         if not uuid_str:
@@ -148,23 +162,28 @@ class ProfitReaperBotV27:
                 return False
             idx = df[mask].index[0]
             df.at[idx, "uuid"] = str(uuid_str).strip()
+            if open_price is not None:
+                try:
+                    df.at[idx, "entry_price"] = f"{float(open_price):.8f}"
+                except (ValueError, TypeError):
+                    pass
             df.to_csv(path, index=False, encoding="utf-8")
             return True
         except Exception as e:
             self.debug_log(f"assign_uuid_to_latest_trade_row: {e}", "ERROR")
             return False
 
-    def on_bo_trade_confirmed_uuid(self, uuid_str):
-        """phx_reply: encolar uuid o pegar a la última fila pendiente."""
+    def on_bo_trade_confirmed_uuid(self, uuid_str, open_price=None):
+        """phx_reply: encolar uuid (+ entry_price) o pegar a la última fila pendiente."""
         if not uuid_str:
             return
-        if not self.assign_uuid_to_latest_trade_row(uuid_str):
+        if not self.assign_uuid_to_latest_trade_row(uuid_str, open_price=open_price):
             self._gemini_uuid_queue.append(str(uuid_str).strip())
 
-    def update_gemini_log_trade_result(self, uuid_str, status_raw, win_cents):
+    def update_gemini_log_trade_result(self, uuid_str, status_raw, win_cents, close_price=None):
         """
-        Rastreador de resultados: actualiza resultado (WON/LOST) y profit_real (USD)
-        en la fila con uuid coincidente.
+        Rastreador de resultados: actualiza resultado (WON/LOST), profit_real (USD)
+        y exit_price en la fila con uuid coincidente.
         """
         path = self.gemini_log_file
         if not uuid_str or not os.path.exists(path):
@@ -188,6 +207,11 @@ class ProfitReaperBotV27:
 
             df.loc[mask, "resultado"] = resultado
             df.loc[mask, "profit_real"] = profit_usd
+            if close_price is not None:
+                try:
+                    df.loc[mask, "exit_price"] = f"{float(close_price):.8f}"
+                except (ValueError, TypeError):
+                    pass
             df.to_csv(path, index=False, encoding="utf-8")
 
             if resultado == "WON":
@@ -205,8 +229,16 @@ class ProfitReaperBotV27:
         uid = payload.get("uuid")
         status = payload.get("status")
         win = payload.get("win", 0)
+        # Precio real de cierre — Binomo puede usar cualquiera de estos campos
+        close_price = (
+            payload.get("close_price")
+            or payload.get("quote_close")
+            or payload.get("close_quote")
+            or payload.get("close")
+            or None
+        )
         if uid and status:
-            self.update_gemini_log_trade_result(uid, status, win)
+            self.update_gemini_log_trade_result(uid, status, win, close_price=close_price)
 
     def debug_log(self, message, level="INFO"):
         """Escribe en disco SOLO WARNING y ERROR. INFO/DEBUG van a /dev/null."""
@@ -267,6 +299,20 @@ class ProfitReaperBotV27:
             if decision_str in ("CALL", "PUT") and self._gemini_uuid_queue:
                 trade_uuid = self._gemini_uuid_queue.popleft()
 
+            # --- FASE 1: Extraer nuevas columnas de telemetría ---
+            hour_utc = int(telemetry_data.get('hour_utc', 0))
+            day_of_week = int(telemetry_data.get('day_of_week', 0))
+            try:
+                rsi_value = float(telemetry_data.get('rsi_value', 0.0))
+            except (ValueError, TypeError):
+                rsi_value = 0.0
+            try:
+                volatility_avg_15s = float(telemetry_data.get('volatility_avg_15s', 0.0))
+            except (ValueError, TypeError):
+                volatility_avg_15s = 0.0
+            # WAIT = 0 centavos; CALL/PUT = monto del paso actual
+            amount_cents = 0 if decision_str == "WAIT" else int(self.base_amount * 100)
+
             # Escribir al CSV
             with open(self.gemini_log_file, mode='a', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
@@ -274,7 +320,7 @@ class ProfitReaperBotV27:
                     timestamp_str,
                     f"{price:.8f}",
                     decision_str,
-                    f"{std_value:.8e}",  # Notación científica para STD (ahora garantizado float)
+                    f"{std_value:.8e}",
                     f"{call_vol:.2f}",
                     f"{put_vol:.2f}",
                     f"{ratio:.4f}",
@@ -282,8 +328,15 @@ class ProfitReaperBotV27:
                     f"{whale_amount:.2f}",
                     strategy_message,
                     trade_uuid,
-                    "",
-                    "",
+                    "",             # resultado (rellena bo closed)
+                    "",             # profit_real (rellena bo closed)
+                    hour_utc,
+                    day_of_week,
+                    f"{rsi_value:.4f}",
+                    f"{volatility_avg_15s:.8e}",
+                    "",             # entry_price (rellena phx_reply)
+                    "",             # exit_price (rellena bo closed)
+                    amount_cents,
                 ])
         except Exception as e:
             self.debug_log(f"❌ Error en Gemini Logger: {e}", "ERROR")
@@ -402,7 +455,15 @@ class ProfitReaperBotV27:
                             if isinstance(resp, dict):
                                 deal_uuid = resp.get("uuid")
                                 if deal_uuid:
-                                    self.on_bo_trade_confirmed_uuid(deal_uuid)
+                                    # Precio real de apertura — Binomo puede usar varios campos
+                                    open_price = (
+                                        resp.get("open_price")
+                                        or resp.get("open_quote")
+                                        or resp.get("price")
+                                        or resp.get("open")
+                                        or None
+                                    )
+                                    self.on_bo_trade_confirmed_uuid(deal_uuid, open_price=open_price)
                             # Resetear Martingala en caso de éxito (ajustar según lógica de negocio)
                             # self.martingale_step = 0
                         elif payload:
@@ -826,11 +887,15 @@ def load_strategy(strategy_number):
         raise ValueError(f"Estrategia {strategy_number} no válida (rango válido: 1-6)")
 
 
+DAILY_SUMMARY_FILE = "daily_summary.csv"
+
+
 def generar_resumen_salida(gemini_log_path: str = "gemini_analysis_log.csv") -> None:
     """
     Lee gemini_analysis_log.csv y muestra un dashboard de sesión en consola.
     Filtra las operaciones del día actual para aislar la sesión en curso.
     Captura cualquier excepción y cierra limpiamente si no hay datos.
+    Al terminar, añade una fila de resumen a daily_summary.csv.
     """
     SEP  = "=" * 62
     SEP2 = "-" * 62
@@ -867,8 +932,17 @@ def generar_resumen_salida(gemini_log_path: str = "gemini_analysis_log.csv") -> 
         lost  = int((df_r["resultado"] == "LOST").sum())
         wr    = won / total * 100 if total > 0 else 0.0
 
+        # --- Matemática financiera neta (FASE 2) ---
         df_r["profit_real"] = pd.to_numeric(df_r["profit_real"], errors="coerce").fillna(0.0)
         pnl_bruto = float(df_r["profit_real"].sum())
+
+        # amount_cents puede estar vacío en filas de sesiones anteriores → coerce a 0
+        if "amount_cents" in df_r.columns:
+            df_r["amount_cents"] = pd.to_numeric(df_r["amount_cents"], errors="coerce").fillna(0)
+        else:
+            df_r["amount_cents"] = 0
+        inversion_total = float(df_r["amount_cents"].sum()) / 100.0
+        balance_neto    = pnl_bruto - inversion_total
 
         # --- Timestamps de inicio/fin ---
         try:
@@ -893,13 +967,51 @@ def generar_resumen_salida(gemini_log_path: str = "gemini_analysis_log.csv") -> 
         print(f"  Perdidas (LOST)    :  {lost:>5d}")
         print(f"  Win Rate           :  {wr:>7.2f} %   (breakeven: 54.02 %)")
         print(SEP2)
-        print(f"  Profit bruto (WON) : +$ {pnl_bruto:>10,.2f}")
+        print(f"  Profit bruto (WON) :  $ {pnl_bruto:>10,.2f}")
+        print(f"  Inversión total    : -$ {inversion_total:>10,.2f}")
+        print(SEP2)
+        print(f"  Balance neto       :  $ {balance_neto:>10,.2f}  ← P&L real")
         print(f"  Veredicto          :  {veredicto}")
         print(SEP + "\n")
+
+        # --- Guardar resumen diario en daily_summary.csv (FASE 2) ---
+        _guardar_daily_summary(today_str, total, won, lost, wr, balance_neto)
 
     except Exception as exc:
         print(f"  Sin datos suficientes para el reporte ({exc})")
         print(SEP + "\n")
+
+
+def _guardar_daily_summary(
+    fecha: str,
+    total_trades: int,
+    won: int,
+    lost: int,
+    win_rate_pct: float,
+    net_profit_usd: float,
+    path: str = DAILY_SUMMARY_FILE,
+) -> None:
+    """Añade una fila al historial diario. Crea cabeceras si el archivo no existe."""
+    try:
+        write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow([
+                    "fecha", "total_trades", "won", "lost",
+                    "win_rate_pct", "net_profit_usd",
+                ])
+            writer.writerow([
+                fecha,
+                total_trades,
+                won,
+                lost,
+                f"{win_rate_pct:.2f}",
+                f"{net_profit_usd:.2f}",
+            ])
+        print(f"  📁 Resumen guardado en {path}")
+    except Exception as exc:
+        print(f"  ⚠️  No se pudo guardar daily_summary: {exc}")
 
 
 async def main():

@@ -9,9 +9,9 @@ WHALE_THRESHOLD      = 5_000_000  # Apuesta unica considerada Ballena
 MIN_VOLUME_REQUIRED  = 50_000     # Volumen minimo total para filtro de datos
 
 # --- FILTROS V5 (Informe Estrategia V5 — Reglas P0/P1) ---
-HORAS_PERMITIDAS = {2, 3, 4, 10, 15, 16, 19, 20, 21}  # UTC
-WHALE_AMT_MIN    = 28_000_000
-WHALE_AMT_MAX    = 999_999_999
+HORAS_PERMITIDAS = set(range(24))   # FASE 2: operar en cualquier hora UTC
+WHALE_AMT_MIN    = 50_000_000       # FASE 2: umbral mínimo ballena → 50M
+WHALE_AMT_MAX    = 100_000_000      # FASE 2: umbral máximo ballena → 100M
 STD_MIN          = 8e-8    # Volatilidad muerta por debajo de este valor
 STD_MAX_PUT      = 1.5e-7  # Volatilidad excesiva para operar PUT
 
@@ -98,18 +98,24 @@ def analyze(df, flow_data=None, std_data=None, rsi=None, hour=None):
         is_whale = whale_detected is not None
 
         def _telemetry():
+            now_utc = datetime.utcnow()
             return {
-                'ratio':          money_ratio,
-                'call_vol':       call_vol,
-                'call_volume':    call_vol,
-                'put_vol':        put_vol,
-                'put_volume':     put_vol,
-                'std':            current_std,
-                'std_current':    current_std,
-                'std_avg':        avg_std,
-                'whale':          is_whale,
-                'whale_detected': is_whale,
-                'whale_amount':   whale_amount,
+                'ratio':              money_ratio,
+                'call_vol':           call_vol,
+                'call_volume':        call_vol,
+                'put_vol':            put_vol,
+                'put_volume':         put_vol,
+                'std':                current_std,
+                'std_current':        current_std,
+                'std_avg':            avg_std,
+                'whale':              is_whale,
+                'whale_detected':     is_whale,
+                'whale_amount':       whale_amount,
+                # --- FASE 1: Nuevas claves de telemetría ---
+                'hour_utc':           now_utc.hour,
+                'day_of_week':        now_utc.weekday(),  # 0=lunes, 6=domingo
+                'rsi_value':          float(rsi) if _rsi_defined(rsi) else 0.0,
+                'volatility_avg_15s': avg_std,
             }
 
         # --- D. FILTROS V5 (P0 primero, luego P1) ---
