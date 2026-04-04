@@ -9,9 +9,12 @@ WHALE_THRESHOLD      = 5_000_000  # Apuesta unica considerada Ballena
 MIN_VOLUME_REQUIRED  = 50_000     # Volumen minimo total para filtro de datos
 
 # --- FILTROS V5 (Informe Estrategia V5 — Reglas P0/P1) ---
-HORAS_PERMITIDAS = set(range(24))   # FASE 2: operar en cualquier hora UTC
-WHALE_AMT_MIN    = 50_000_000       # FASE 2: umbral mínimo ballena → 50M
-WHALE_AMT_MAX    = 100_000_000      # FASE 2: umbral máximo ballena → 100M
+WHALE_AMT_MIN = 50_000_000   # umbral mínimo ballena → 50M
+WHALE_AMT_MAX = 100_000_000  # umbral máximo ballena → 100M
+
+# --- CEREBRO DUAL: horarios diferenciados por tipo de mercado ---
+HORAS_SEMANA = {13, 14, 15, 16, 17, 19, 20, 21}          # Lunes–Viernes (mercado real)
+HORAS_OTC    = {2, 3, 4, 7, 9, 10, 11, 13, 15, 16, 20, 21}  # Sábado–Domingo (OTC)
 STD_MIN          = 8e-8    # Volatilidad muerta por debajo de este valor
 STD_MAX_PUT      = 1.5e-7  # Volatilidad excesiva para operar PUT
 
@@ -120,11 +123,14 @@ def analyze(df, flow_data=None, std_data=None, rsi=None, hour=None):
 
         # --- D. FILTROS V5 (P0 primero, luego P1) ---
 
-        # REGLA 1 (P0): Filtro horario estricto
-        if datetime.utcnow().hour not in HORAS_PERMITIDAS:
+        # REGLA 1 (P0): Cerebro Dual — filtro horario según tipo de mercado
+        _now_utc      = datetime.utcnow()
+        _dow          = _now_utc.weekday()           # 0=lun … 6=dom
+        _horas_activas = HORAS_OTC if _dow >= 5 else HORAS_SEMANA
+        if _now_utc.hour not in _horas_activas:
             return {
                 'action':    None,
-                'message':   'WAIT: Hora no autorizada',
+                'message':   'WAIT: Fuera de horario comercial',
                 'telemetry': _telemetry(),
             }
 

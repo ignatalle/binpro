@@ -1,5 +1,6 @@
-=== DEBUG TRADING BOT - 2026-04-03 08:04:56 ===
+=== DEBUG TRADING BOT - 2026-04-04 07:40:53 ===
 Estrategia: strategies.volume_flow
 Asset: Z-CRY/IDX
 Account Type: demo
 
+[2026-04-04 10:48:00] [WARN] ⚠️ closed bo: uuid 019d58bf-9423-76dc-a5b9-5ec8330495ee no encontrado en gemini_analysis_log.csv
